@@ -1,0 +1,436 @@
+deploy python application behind nginx that interacts with rabbitMQ and Celery for sending and logging functionality
+
+////////////////////////////////////////////////////////////////////////////////
+ssh -i "D:\Timiajayi\Downloads\hngdo3.pem" ubuntu@ec2-51-20-247-145.eu-north-1.compute.amazonaws.com
+
+-Update the package list and upgrade existing packages:
+sudo apt update && sudo apt upgrade -y
+
+-Install necessary packages: python3,pip,virtualenv,nginx,rabbitmq,git
+sudo apt install -y python3 python3-pip python3-venv nginx rabbitmq-server git
+
+-Enable and start RabbitMQ service:(if it doesnt start automatically)
+sudo systemctl status rabbitmq-server
+sudo rabbitmq-plugins enable rabbitmq_management
+sudo systemctl enable rabbitmq-server
+sudo systemctl start rabbitmq-server
+--------------------------------
+ http://<your_server_ip>:15672
+51.20.247.145
+
+Username: guest 
+Password: guest 
+-------------------------------
+
+
+-Set up a virtual environment:
+python3 -m venv venv
+source venv/bin/activate
+
+-Install required Python packages:
+-----req.txt---
+Flask
+Flask-Mail
+Celery
+---------------
+pip install -r requirements.txt
+---------pip freeze > requirements.txt
+
+-Set up mail variables
+MAIL_SERVER=smtp.hostinger.com
+MAIL_PORT=465
+MAIL_USERNAME=hngtest@waltanforte.com
+MAIL_PASSWORD=@HNGtest2024
+--------------celeryconfig.py--------------------------
+
+broker_url = 'amqp://localhost'
+result_backend = 'rpc://'
+https://51.20.247.145/
+--------------------------------------
+-app.py
+------------------------------------------------------------------
+from flask import Flask, request
+from celery import Celery
+from flask_mail import Mail, Message
+import logging
+from datetime import datetime
+
+app = Flask(__name__)
+
+app.config.update(
+    MAIL_SERVER='smtp.hostinger.com',
+    MAIL_PORT=465,
+    MAIL_USERNAME='hngtest@waltanforte.com',
+    MAIL_PASSWORD='@HNGtest2024',
+    MAIL_USE_TLS=False,
+    MAIL_USE_SSL=True,
+)
+
+mail = Mail(app)
+
+# Configure Celery
+def make_celery(app):
+    celery = Celery(
+        app.import_name,
+        backend=app.config['result_backend'],
+        broker=app.config['broker_url']
+    )
+    celery.conf.update(app.config)
+    class ContextTask(celery.Task):
+        def __call__(self, *args, **kwargs):
+            with app.app_context():
+                return self.run(*args, **kwargs)
+    celery.Task = ContextTask
+    return celery
+
+app.config.update(
+    broker_url='amqp://localhost',
+    result_backend='rpc://'
+)
+
+celery = make_celery(app)
+
+@celery.task
+def send_async_email(recipients, subject, body):
+    with app.app_context():
+        msg = Message(subject, sender='hngtest@waltanforte.com', recipients=[recipients])
+        msg.body = body
+        mail.send(msg)
+
+@app.route('/', methods=['GET'])
+def index():
+    sendmail = request.args.get('sendmail')
+    talktome = request.args.get('talktome')
+
+    if sendmail:
+        # Validate email format
+        if '@' in sendmail:
+            subject = 'Hello'
+            body = 'This is a test email sent from the Flask app with Celery.'
+            send_async_email.delay(sendmail, subject, body)
+            return 'Email sent!'
+        else:
+            return 'Invalid email address format.'
+
+    if talktome:
+        # Log current time to /var/log/messaging_system.log
+        log_path = '/var/log/messaging_system.log'
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, 'a') as log_file:
+            log_file.write(f'Message received at {current_time}\n')
+        return 'Logged!'
+
+    return 'No valid parameter provided.'
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
+----------------------------------------------------------------------
+-install Nginx
+sudo systemctl status nginx
+sudo systemctl enable nginx
+sudo systemctl start nginx
+#sudo apt update
+#sudo apt install nginx
+
+
+-configure nginx
+sudo nano /etc/nginx/sites-available/messaging_system
+-------add-------------------
+server {
+    listen 80;
+    server_name _;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+-----------------------------------------
+sudo ln -s /etc/nginx/sites-available/messaging_system /etc/nginx/sites-enabled
+sudo nginx -t
+sudo systemctl restart nginx
+
+-install ngrok
+curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+	| sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null \
+	&& echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+	| sudo tee /etc/apt/sources.list.d/ngrok.list \
+	&& sudo apt update \
+	&& sudo apt install ngrok
+
+source venv/bin/activate
+
+
+ngrok config add-authtoken 2
+
+ngrok http 80
+
+-Start Celery worker
+celery -A app.celery worker --loglevel=info
+
+python app.py
+
+
+---Testing
+Access your application:
+Use the ngrok URL provided to test your application endpoints:
+http://<ngrok_url>/?sendmail=mailto:destiny@destinedcodes.com
+http://<ngrok_url>/?talktome
+/////////////////////////////////////////////////////
+---allow local host on managment
+sudo nano /etc/rabbitmq/rabbitmq.conf
+loopback_users = none
+sudo systemctl restart rabbitmq-server
+http://51.20.247.145:15672/
+http://<your_instance_public_ip>:5000/messaging?sendmail=destiny@destinedcodes.com
+////////////////////////////////////////////////
+
+
+////////////////////////////////
+--nginx not working
+nano /etc/nginx/sites-available/messaging_system
+sudo systemctl restart nginx
+
+--allow login on aws instance
+sudo nano /etc/rabbitmq/rabbitmq.conf
+sudo systemctl restart rabbitmq-server
+
+--to allow logging
+cd /var/log
+nano messaging_system.log
+ls -l
+sudo chown ubuntu:ubuntu /var/log/messaging_system.log
+sudo chmod u+w /var/log/messaging_system.log
+
+--------------ngrok key
+get url from endpoints menu
+
+----to stay lives after terminal closes
+nohup celery -A app.celery worker --loglevel=info &
+nohup python app.py &
+nohup ngrok http 80 &
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/////////////////////////////////////////////////////////////////
+1. install RabbitMQ
+-install chocolatry
+-- open cmd as administrator
+--run (choco install rabbitmq) to install rabbitmq, Yes to all
+---ensure running script is enabled in your powershell
+---- Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+---need to add to system path
+--start rabbitMQ ('rabbitmq-server start' or 'rabbitmq-server')
+
+//////////////////////////////////////////////////////////////
+cd d:
+cd Timiajayi\Desktop\ms\
+venv\Scripts\activate
+
+python app.py
+celery -A tasks worker --loglevel=info
+celery -A app.celery worker --loglevel=info
+
+
+/////////////////////////////////////////////////////////////
+
+ladydhotel@bam-techservices.com
+@ladydhotel2023
+Host: smtp.hostinger.com
+
+Encryption: SSL
+
+Port number: 465 
+
+Outgoing server (SMTP)
+
+smtp.hostinger.com 
+
+465
+/////////////////////app.py/////////////////////////////////
+from flask import Flask, request
+from celery import Celery
+from smtplib import SMTP
+import logging
+import time
+
+app = Flask(__name__)
+
+app.config['CELERY_BROKER_URL'] = 'pyamqp://guest@localhost//'
+app.config['CELERY_RESULT_BACKEND'] = 'rpc://'
+
+celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
+celery.conf.update(app.config)
+
+@celery.task
+def send_email(recipient):
+    with SMTP('smtp.hostinger.com',port=465) as smtp:
+        smtp.starttls(context=ssl.create_default_context())
+        smtp.login('ladydhotel@bam-techservices.com', '@ladydhotel2023')
+        smtp.sendmail('your_email_username', recipient, 'Hello, this is a test email!')
+
+@app.route('/')
+def index():
+    if 'sendmail' in request.args:
+        recipient = request.args.get('sendmail')
+        send_email.delay(recipient)
+        return f"Email queued to {recipient}"
+    elif 'talktome' in request.args:
+        with open('C:\\var\\log\\messaging_system.log', 'a') as f:
+            f.write(f"Current time: {time.ctime()}\n")
+        return "Logged current time"
+    else:
+        return "Specify either ?sendmail or ?talktome"
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+Therefore, the mail is sent to whomever's email address is provided in the ?sendmail query parameter when accessing the Flask app. For example, if you access http://127.0.0.1:5000/?sendmail=johndoe@example.com, the email will be sent to johndoe@example.com.
+
+http://localhost:5000/send-email?sendmail=timiajayi2001@gmail.com
+//////////////////////////////////////////////////////////////////////////////
+source venv/bin/activate
+
+
+
+in my root i have
+folder 'venv'
+and 3 files belw
+
+app.py
+from flask import Flask, request
+from celery import Celery
+from flask_mail import Mail, Message
+import logging
+
+app = Flask(__name__)
+
+# Configure Flask-Mail
+app.config.update(
+    MAIL_SERVER='smtp.example.com',
+    MAIL_PORT=587,
+    MAIL_USE_TLS=True,
+    MAIL_USERNAME='your-email@example.com',
+    MAIL_PASSWORD='your-email-password'
+)
+
+# Initialize Flask-Mail
+mail = Mail(app)
+
+# Initialize Celery
+celery = Celery(
+    app.import_name,
+    broker='pyamqp://guest@localhost//',
+    backend='rpc://'
+)
+
+# Optional Celery configuration
+celery.conf.update(
+    task_routes={
+        'app.tasks.send_async_email': {'queue': 'emails'},
+    },
+    timezone='UTC',
+    enable_utc=True,
+)
+
+# Celery task for sending asynchronous emails
+@celery.task
+def send_async_email(msg):
+    with app.app_context():
+        mail.send(msg)
+
+# Flask route for sending emails
+@app.route('/send-email')
+def send_email():
+    recipient = request.args.get('sendmail')
+    if recipient:
+        msg = Message(
+            'Hello',
+            sender='your-email@example.com',
+            recipients=[recipient]
+        )
+        msg.body = 'This is a test email sent from a background Celery task.'
+        send_async_email.delay(msg)
+        return 'Email sent!'
+    return 'No email provided'
+
+# Flask route for logging current time
+@app.route('/talktome')
+def talk_to_me():
+    logging.basicConfig(filename='messaging_system.log', level=logging.INFO)
+    logging.info('Current time logged.')
+    return 'Time logged'
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
+celeryconfig.py
+
+from celery import Celery
+
+celery = Celery(
+    'app',
+    broker='pyamqp://guest@localhost:5672//',
+    backend='rpc://',
+    include=['app']
+)
+
+# Optional configuration, see the application user guide.
+celery.conf.update(
+    task_routes={
+        'app.tasks.send_async_email': {'queue': 'emails'},
+    },
+    timezone='UTC',
+    enable_utc=True,
+)
+
+requirment.txt
+Flask==2.0.1
+Celery==5.1.2
+Flask-Mail==0.9.1
+
+
+
